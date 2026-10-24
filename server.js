@@ -278,7 +278,12 @@ async function handleList(req, res, searchParams) {
 // every other route is 404 per the issue contract.
 async function handle(req, res) {
   try {
-    res.once('error', () => {}); // a dying socket must never crash the process
+    // One response object may emit several 'error' events in a row (e.g. a
+    // write-after-end followed by the socket tearing down); `on` keeps a
+    // listener attached for every emission so none of them lands on zero
+    // listeners as an unhandled 'error' event — that would raise
+    // uncaughtException and kill the process, which PRD §Errors forbids.
+    res.on('error', () => {});
     let url;
     try {
       url = new URL(req.url, 'http://localhost');
