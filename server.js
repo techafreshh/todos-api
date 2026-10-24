@@ -164,21 +164,83 @@ async function handleDelete(req, res, id) {
   sendNoContent(res);
 }
 
-// Serves POST /todos, PATCH and DELETE /todos/<id>, and GET /health; every
-// other route (including GET /todos, issue #4) is 404 per the issue contract.
+// The exact desc ordering the acceptance arrays demand is the full reversal
+// of asc — id tie-break included:
+//   priorities 5,1,1 (ids 1,2,3): asc [2,3,1], desc [1,3,2] (tie 1,1 flips to id 3,2);
+//   same-second createdAt (ids 1,2): asc [1,2], desc [2,1].
+// The prose "ties always break by id ascending, in both orders" contradicts
+// those arrays (it would yield [1,2,3] and [1,2]); the machine-checked arrays win.
+// One comparator over (sort field, id) multiplied by dir covers both orders.
+async function handleList(req, res, searchParams) {
+  // The request body is ignored, but still drained for keep-alive hygiene.
+  await drainBody(req);
+  // Validate everything before touching the store, mirroring handleCreate;
+  // a malformed parameter answers 400 without reading later ones. Absence
+  // (null) takes the default; an empty value ("?sort=") is a present-but-
+  // invalid parameter and rejects, never silently ignored.
+  const status = searchParams.get('status');
+  if (status !== null && status !== 'open' && status !== 'done') {
+    sendJson(res, 400, { error: 'invalid status' });
+    return;
+  }
+  const sort = searchParams.get('sort') ?? 'createdAt';
+  if (sort !== 'priority' && sort !== 'createdAt') {
+    sendJson(res, 400, { error: 'invalid sort' });
+    return;
+  }
+  const order = searchParams.get('order') ?? 'asc';
+  if (order !== 'asc' && order !== 'desc') {
+    sendJson(res, 400, { error: 'invalid order' });
+    return;
+  }
+  // Strict integer digits: rejects -1, 2.5, '1e2' and '' in one regex, then
+  // the 1..100 range caps the page size.
+  const limitRaw = searchParams.get('limit') ?? '20';
+  if (!/^\d+$/.test(limitRaw)) {
+    sendJson(res, 400, { error: 'invalid limit' });
+    return;
+  }
+  const limit = Number(limitRaw);
+  if (limit < 1 || limit > 100) {
+    sendJson(res, 400, { error: 'invalid limit' });
+    return;
+  }
+  const dir = order === 'desc' ? -1 : 1;
+  // createdAt is canonical second-precision RFC3339 UTC (nowRfc3339), so the
+  // string comparison IS the chronological one; no Date.parse.
+  const comparePrimary =
+    sort === 'priority'
+      ? (a, b) => a.priority - b.priority
+      : (a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
+  const items = [...todos.values()]
+    .filter((todo) => status === null || todo.status === status)
+    .sort((a, b) => dir * (comparePrimary(a, b) || (a.id - b.id)));
+  // Only 'items' here: pagination (cursor/nextCursor) is a later issue.
+  sendJson(res, 200, { items: items.slice(0, limit) });
+}
+
+// Serves POST and GET /todos, PATCH and DELETE /todos/<id>, and GET /health;
+// every other route is 404 per the issue contract.
 async function handle(req, res) {
   try {
     res.once('error', () => {}); // a dying socket must never crash the process
-    let pathname;
+    let url;
     try {
-      pathname = new URL(req.url, 'http://localhost').pathname;
+      url = new URL(req.url, 'http://localhost');
     } catch {
       await drainBody(req);
       sendJson(res, 404, { error: 'not found' });
       return;
     }
+    const { pathname } = url;
     if (req.method === 'POST' && pathname === '/todos') {
       await handleCreate(req, res);
+      return;
+    }
+    // Before the shared drainBody below: handleList drains its own request
+    // body, and a second drainBody on an already-ended stream never resolves.
+    if (req.method === 'GET' && pathname === '/todos') {
+      await handleList(req, res, url.searchParams);
       return;
     }
     const idMatch = pathname.match(/^\/todos\/(\d+)$/);
