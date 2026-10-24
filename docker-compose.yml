@@ -1,0 +1,9 @@
+services:
+  worker:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: node server.js
+    ports:
+      - "127.0.0.1:3000:3000"
