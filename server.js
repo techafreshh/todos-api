@@ -164,13 +164,6 @@ async function handleDelete(req, res, id) {
   sendNoContent(res);
 }
 
-// The exact desc ordering the acceptance arrays demand is the full reversal
-// of asc — id tie-break included:
-//   priorities 5,1,1 (ids 1,2,3): asc [2,3,1], desc [1,3,2] (tie 1,1 flips to id 3,2);
-//   same-second createdAt (ids 1,2): asc [1,2], desc [2,1].
-// The prose "ties always break by id ascending, in both orders" contradicts
-// those arrays (it would yield [1,2,3] and [1,2]); the machine-checked arrays win.
-// One comparator over (sort field, id) multiplied by dir covers both orders.
 // Cursor codec (issue #5). A cursor is the plain base64 of the last item's
 // id as decimal digits: opaque to the client, and carrying no query state —
 // status/sort/order are always interpreted from the current request, so the
@@ -251,9 +244,15 @@ async function handleList(req, res, searchParams) {
     sort === 'priority'
       ? (a, b) => a.priority - b.priority
       : (a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
+  // Ties always break by id ascending in BOTH orders (PRD.md "Read (list +
+  // query semantics)", issue #13): `dir` multiplies only the primary key, so
+  // priorities 5,1,1 (ids 1,2,3) give asc [2,3,1] and desc [1,2,3]. The old
+  // full-reversal form `dir * (comparePrimary || id-cmp)` — from issue #4's
+  // out-of-repo acceptance arrays — flipped ties to id-descending under desc,
+  // contradicting the PRD; the parens must stay off the tie-break.
   const items = [...todos.values()]
     .filter((todo) => status === null || todo.status === status)
-    .sort((a, b) => dir * (comparePrimary(a, b) || (a.id - b.id)));
+    .sort((a, b) => dir * comparePrimary(a, b) || (a.id - b.id));
   // Page slicing by id anchor in the already-sorted array: with a cursor the
   // page is every item strictly after the anchor's position in THIS request's
   // ordering — creations that land after the anchor can never shift it. An

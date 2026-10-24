@@ -201,6 +201,45 @@ test('cursor is anchored in the requested ordering, not the id order (priority a
   }
 });
 
+test('priority-sort walk is stable across an intervening create: cursor at id 4 yields [5,1] then [6,3]', async () => {
+  const { ready, stop } = startServer();
+  try {
+    const port = await ready;
+    await createTodos(port, [
+      { title: 'p3', priority: 3 },
+      { title: 'p1a', priority: 1 },
+      { title: 'p5', priority: 5 },
+      { title: 'p1b', priority: 1 },
+      { title: 'p2', priority: 2 },
+    ]);
+    // priority asc, ties id ascending: [2,4] (p1), [5] (p2), [1] (p3), [3] (p5).
+    const page1 = await get(port, '?sort=priority&limit=2');
+    assert.deepStrictEqual(page1.body.items.map((t) => t.id), [2, 4]);
+    assert.strictEqual(page1.body.nextCursor, encodeId(4));
+    // A priority-4 todo lands BETWEEN the page-1 anchor and p5 in the
+    // ordering; the anchor is positional, so it cannot push the next page.
+    const arrived = await post(port, JSON.stringify({ title: 'later p4', priority: 4 }));
+    assert.strictEqual(arrived.status, 201); // id 6
+    const page2 = await get(port, `?sort=priority&limit=2&cursor=${page1.body.nextCursor}`);
+    assert.deepStrictEqual(page2.body.items.map((t) => t.id), [5, 1]);
+    assert.strictEqual(page2.body.nextCursor, encodeId(1));
+    const page3 = await get(port, `?sort=priority&limit=2&cursor=${page2.body.nextCursor}`);
+    assert.deepStrictEqual(page3.body.items.map((t) => t.id), [6, 3]);
+    // Exactly limit items: the count-based rule emits a cursor even at the end
+    // of the ordering; re-paging it answers the stable empty tail page.
+    assert.strictEqual(page3.body.nextCursor, encodeId(3));
+    const tail = await get(port, `?sort=priority&limit=2&cursor=${page3.body.nextCursor}`);
+    assert.deepStrictEqual(tail.body, { items: [], nextCursor: null });
+    // Every todo appears exactly once across the walk: no duplicates, no misses.
+    assert.deepStrictEqual(
+      [...page1.body.items, ...page2.body.items, ...page3.body.items].map((t) => t.id).sort((a, b) => a - b),
+      [1, 2, 3, 4, 5, 6],
+    );
+  } finally {
+    await stop();
+  }
+});
+
 test('same anchoring under order=desc: pages continue from the cursor in desc order', async () => {
   const { ready, stop } = startServer();
   try {
@@ -212,15 +251,16 @@ test('same anchoring under order=desc: pages continue from the cursor in desc or
       { title: 'p1b', priority: 1 },
       { title: 'p2', priority: 2 },
     ]);
-    // desc reverses the whole comparator, tie included: [3] (p5), [1] (p3),
-    // [5] (p2), [4,2] (p1 with ids descending per issue #4's tie-break).
+    // desc negates only the priority; the (1,1) tie stays id ascending:
+    // full order [3,1,5,2,4] — p5, p3, p2, then p1 as ids 2,4 (issue #13).
     const page1 = await get(port, '?sort=priority&order=desc&limit=2');
     assert.deepStrictEqual(page1.body.items.map((t) => t.id), [3, 1]);
     assert.strictEqual(page1.body.nextCursor, encodeId(1));
     const page2 = await get(port, `?sort=priority&order=desc&limit=2&cursor=${page1.body.nextCursor}`);
-    assert.deepStrictEqual(page2.body.items.map((t) => t.id), [5, 4]);
+    assert.deepStrictEqual(page2.body.items.map((t) => t.id), [5, 2]);
+    assert.strictEqual(page2.body.nextCursor, encodeId(2));
     const page3 = await get(port, `?sort=priority&order=desc&limit=2&cursor=${page2.body.nextCursor}`);
-    assert.deepStrictEqual(page3.body.items.map((t) => t.id), [2]);
+    assert.deepStrictEqual(page3.body.items.map((t) => t.id), [4]);
     assert.strictEqual(page3.body.nextCursor, null);
   } finally {
     await stop();

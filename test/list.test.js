@@ -102,7 +102,7 @@ test('sort=priority is numeric with id-ascending ties: priorities 5,1,1 give ids
   }
 });
 
-test('sort=priority&order=desc reverses the whole comparator, ties included: ids [1,3,2]', async () => {
+test('sort=priority&order=desc keeps id-ascending ties: ids [1,2,3]', async () => {
   const { ready, stop } = startServer();
   try {
     const port = await ready;
@@ -111,28 +111,40 @@ test('sort=priority&order=desc reverses the whole comparator, ties included: ids
     await post(port, JSON.stringify({ title: 'one-b', priority: 1 }));
     const { status, body } = await get(port, '?sort=priority&order=desc');
     assert.strictEqual(status, 200);
-    // The tie (ids 2,3) flips to id-descending in desc: the acceptance array
-    // [1,3,2], not the prose's always-id-ascending [1,2,3].
-    assert.deepStrictEqual(body.items.map((t) => t.id), [1, 3, 2]);
+    // Ties break by id ascending in BOTH orders (PRD.md Read semantics, issue
+    // #13): the (1,1) pair stays ids 2,3 under desc, so only priority 5 moves.
+    assert.deepStrictEqual(body.items.map((t) => t.id), [1, 2, 3]);
   } finally {
     await stop();
   }
 });
 
-test('same-second createdAt sorts chronologically; desc still puts id 2 first: ids [2,1]', async () => {
+test('createdAt ties break id-ascending in both orders, even across a second boundary', async () => {
   const { ready, stop } = startServer();
   try {
     const port = await ready;
-    const first = await post(port, JSON.stringify({ title: 'one' }));
-    const second = await post(port, JSON.stringify({ title: 'two' }));
-    assert.strictEqual(first.status, 201);
-    assert.strictEqual(second.status, 201);
-    // Canonical RFC3339 strings compare chronologically whether or not the
-    // same second was hit; second >= first holds either way.
-    assert.ok(second.body.createdAt >= first.body.createdAt);
-    const { status, body } = await get(port, '?sort=createdAt&order=desc');
-    assert.strictEqual(status, 200);
-    assert.deepStrictEqual(body.items.map((t) => t.id), [2, 1]);
+    // 8 creates may straddle a second boundary, so createdAt values are not
+    // necessarily all equal: the expectation is computed from the actual
+    // timestamps with the PRD comparator (primary ±, ties id ascending) and
+    // stays deterministic either way.
+    const created = [];
+    for (let i = 1; i <= 8; i++) {
+      const { status, body } = await post(port, JSON.stringify({ title: `t${i}` }));
+      assert.strictEqual(status, 201);
+      created.push(body);
+    }
+    const byAsc = (a, b) =>
+      (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0) || a.id - b.id;
+    const byDesc = (a, b) =>
+      (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0) || a.id - b.id;
+    const asc = await get(port, '?sort=createdAt&limit=100');
+    const desc = await get(port, '?sort=createdAt&order=desc&limit=100');
+    assert.strictEqual(asc.status, 200);
+    assert.strictEqual(desc.status, 200);
+    // Ties (equal createdAt strings) keep ids ascending in BOTH orders: desc
+    // negates only the timestamp comparison, never the id tie-break.
+    assert.deepStrictEqual(asc.body.items.map((t) => t.id), [...created].sort(byAsc).map((t) => t.id));
+    assert.deepStrictEqual(desc.body.items.map((t) => t.id), [...created].sort(byDesc).map((t) => t.id));
   } finally {
     await stop();
   }
