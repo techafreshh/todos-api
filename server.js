@@ -3,7 +3,7 @@
 const http = require('node:http');
 
 // In-memory store keyed by id. Ids come from a counter that only increments
-// (even when entries get deleted by a later issue), so they are never reused.
+// (even when entries get deleted), so they are never reused.
 const todos = new Map();
 let nextId = 1;
 
@@ -18,6 +18,13 @@ function sendJson(res, status, payload) {
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
+}
+
+// 204 must carry no body, so this deliberately writes only the status line —
+// no Content-Type and no Content-Length that would promise one.
+function sendNoContent(res) {
+  res.writeHead(204);
+  res.end();
 }
 
 // Consume (and discard) the request body before responding so keep-alive and
@@ -103,8 +110,62 @@ async function handleCreate(req, res) {
   sendJson(res, 201, todo);
 }
 
-// Serves POST /todos and GET /health; every other route (including GET
-// /todos, a later issue) is 404 per the issue contract.
+// PATCH /todos/<id>: the body must be exactly {"status":"done"} or
+// {"status":"open"}. Validation precedes the id lookup, so an invalid body
+// is 400 even toward an unknown id — stable ordering, mirroring create's
+// validate-everything-then-touch-state shape.
+async function handlePatch(req, res, id) {
+  const { buffer, overflow } = await readBody(req);
+  if (overflow) {
+    sendJson(res, 400, { error: 'payload too large' });
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(buffer.toString('utf8'));
+  } catch {
+    sendJson(res, 400, { error: 'malformed JSON' });
+    return;
+  }
+  if (parsed === null || typeof parsed !== 'object') {
+    sendJson(res, 400, { error: 'invalid body' });
+    return;
+  }
+  // Exactly one key named `status`: rejects missing, extra and unknown-named
+  // fields in one check.
+  if (Object.keys(parsed).length !== 1 || parsed.status === undefined) {
+    sendJson(res, 400, { error: 'invalid body' });
+    return;
+  }
+  // Case-sensitive: only the exact lowercase literals transition a todo.
+  if (parsed.status !== 'done' && parsed.status !== 'open') {
+    sendJson(res, 400, { error: 'invalid status' });
+    return;
+  }
+  const todo = todos.get(id);
+  if (todo === undefined) {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  // Mutate in place so the response carries every field of the stored todo.
+  todo.status = parsed.status;
+  sendJson(res, 200, todo);
+}
+
+// DELETE /todos/<id>: remove the entry and answer 204 with no body. The id
+// counter never moves backward, so deleted ids are never allocated again.
+async function handleDelete(req, res, id) {
+  // The request body is ignored, but still drained for keep-alive hygiene.
+  await drainBody(req);
+  if (!todos.delete(id)) {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  sendNoContent(res);
+}
+
+// Serves POST /todos, PATCH and DELETE /todos/<id>, and GET /health; every
+// other route (including GET /todos, issue #4) is 404 per the issue contract.
 async function handle(req, res) {
   try {
     res.once('error', () => {}); // a dying socket must never crash the process
@@ -118,6 +179,15 @@ async function handle(req, res) {
     }
     if (req.method === 'POST' && pathname === '/todos') {
       await handleCreate(req, res);
+      return;
+    }
+    const idMatch = pathname.match(/^\/todos\/(\d+)$/);
+    if (idMatch && req.method === 'PATCH') {
+      await handlePatch(req, res, Number(idMatch[1]));
+      return;
+    }
+    if (idMatch && req.method === 'DELETE') {
+      await handleDelete(req, res, Number(idMatch[1]));
       return;
     }
     await drainBody(req);
