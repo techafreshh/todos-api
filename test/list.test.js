@@ -12,9 +12,10 @@ const assert = require('node:assert');
 const SERVER_PATH = path.join(__dirname, '..', 'server.js');
 const READY_TIMEOUT_MS = 5000;
 
-// The cursor is the base64 of the last item's id (issue #5); the tests assert
-// against the exact encoding the server must produce.
-const encodeId = (id) => Buffer.from(String(id), 'utf8').toString('base64');
+// The cursor is the last item's id as a plain base-10 string (PRD.md
+// Pagination semantics: "cursor is the last item's id from the previous
+// page"); the tests assert against that exact rendering.
+const encodeId = (id) => String(id);
 
 function startServer() {
   // PORT=0 asks the OS for an ephemeral port, so parallel runs never collide.
@@ -102,7 +103,7 @@ test('sort=priority is numeric with id-ascending ties: priorities 5,1,1 give ids
   }
 });
 
-test('sort=priority&order=desc reverses the whole comparator, ties included: ids [1,3,2]', async () => {
+test('sort=priority&order=desc keeps id-ascending ties: ids [1,2,3]', async () => {
   const { ready, stop } = startServer();
   try {
     const port = await ready;
@@ -111,28 +112,40 @@ test('sort=priority&order=desc reverses the whole comparator, ties included: ids
     await post(port, JSON.stringify({ title: 'one-b', priority: 1 }));
     const { status, body } = await get(port, '?sort=priority&order=desc');
     assert.strictEqual(status, 200);
-    // The tie (ids 2,3) flips to id-descending in desc: the acceptance array
-    // [1,3,2], not the prose's always-id-ascending [1,2,3].
-    assert.deepStrictEqual(body.items.map((t) => t.id), [1, 3, 2]);
+    // Ties break by id ascending in BOTH orders (PRD.md Read semantics, issue
+    // #13): the (1,1) pair stays ids 2,3 under desc, so only priority 5 moves.
+    assert.deepStrictEqual(body.items.map((t) => t.id), [1, 2, 3]);
   } finally {
     await stop();
   }
 });
 
-test('same-second createdAt sorts chronologically; desc still puts id 2 first: ids [2,1]', async () => {
+test('createdAt ties break id-ascending in both orders, even across a second boundary', async () => {
   const { ready, stop } = startServer();
   try {
     const port = await ready;
-    const first = await post(port, JSON.stringify({ title: 'one' }));
-    const second = await post(port, JSON.stringify({ title: 'two' }));
-    assert.strictEqual(first.status, 201);
-    assert.strictEqual(second.status, 201);
-    // Canonical RFC3339 strings compare chronologically whether or not the
-    // same second was hit; second >= first holds either way.
-    assert.ok(second.body.createdAt >= first.body.createdAt);
-    const { status, body } = await get(port, '?sort=createdAt&order=desc');
-    assert.strictEqual(status, 200);
-    assert.deepStrictEqual(body.items.map((t) => t.id), [2, 1]);
+    // 8 creates may straddle a second boundary, so createdAt values are not
+    // necessarily all equal: the expectation is computed from the actual
+    // timestamps with the PRD comparator (primary ±, ties id ascending) and
+    // stays deterministic either way.
+    const created = [];
+    for (let i = 1; i <= 8; i++) {
+      const { status, body } = await post(port, JSON.stringify({ title: `t${i}` }));
+      assert.strictEqual(status, 201);
+      created.push(body);
+    }
+    const byAsc = (a, b) =>
+      (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0) || a.id - b.id;
+    const byDesc = (a, b) =>
+      (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0) || a.id - b.id;
+    const asc = await get(port, '?sort=createdAt&limit=100');
+    const desc = await get(port, '?sort=createdAt&order=desc&limit=100');
+    assert.strictEqual(asc.status, 200);
+    assert.strictEqual(desc.status, 200);
+    // Ties (equal createdAt strings) keep ids ascending in BOTH orders: desc
+    // negates only the timestamp comparison, never the id tie-break.
+    assert.deepStrictEqual(asc.body.items.map((t) => t.id), [...created].sort(byAsc).map((t) => t.id));
+    assert.deepStrictEqual(desc.body.items.map((t) => t.id), [...created].sort(byDesc).map((t) => t.id));
   } finally {
     await stop();
   }
@@ -179,8 +192,8 @@ test('limit caps the page: default 20 of 21, limit=1, and limit=100 keeps all 21
     const defaultPage = await get(port);
     assert.strictEqual(defaultPage.status, 200);
     assert.strictEqual(defaultPage.body.items.length, 20);
-    // A full page always emits the last id's cursor (base64 of 20), even though
-    // one more item exists — purely count-based rule.
+    // A full page always emits the last id's cursor (the plain id 20), even
+    // though one more item exists — purely count-based rule.
     assert.strictEqual(defaultPage.body.nextCursor, encodeId(20));
     const one = await get(port, '?limit=1');
     assert.strictEqual(one.status, 200);
@@ -216,10 +229,14 @@ test('invalid query parameters are 400 and leave the store and process untouched
       '?limit=2.5',
       '?limit=-1',
       '?limit=', // present but empty
-      '?cursor=@@@', // base64-impossible garbage
+      '?cursor=@@@', // non-id garbage
       '?cursor=', // present but empty: never silently page one
-      '?cursor=banana', // decodes to non-id text
-      '?cursor=MA==', // canonical base64, but id 0 does not exist
+      '?cursor=banana', // non-id text
+      '?cursor=MA==', // base64 residue is never an id under the plain codec
+      '?cursor=0', // id 0: below the positive range
+      '?cursor=02', // leading zero: not the canonical rendering
+      '?cursor=-1', // negative
+      '?cursor=1e2', // exponent notation is not digits
     ];
     for (const query of rejected) {
       const { status, body } = await get(port, query);
