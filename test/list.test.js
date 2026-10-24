@@ -12,6 +12,10 @@ const assert = require('node:assert');
 const SERVER_PATH = path.join(__dirname, '..', 'server.js');
 const READY_TIMEOUT_MS = 5000;
 
+// The cursor is the base64 of the last item's id (issue #5); the tests assert
+// against the exact encoding the server must produce.
+const encodeId = (id) => Buffer.from(String(id), 'utf8').toString('base64');
+
 function startServer() {
   // PORT=0 asks the OS for an ephemeral port, so parallel runs never collide.
   const child = spawn(process.execPath, [SERVER_PATH], {
@@ -58,7 +62,7 @@ async function get(port, query = '') {
   return { status: res.status, body: await res.json() };
 }
 
-test('list defaults: all items, createdAt/id order, response carries only items', async () => {
+test('list defaults: all items, createdAt/id order, response carries items and nextCursor', async () => {
   const { ready, stop } = startServer();
   try {
     const port = await ready;
@@ -71,9 +75,11 @@ test('list defaults: all items, createdAt/id order, response carries only items'
     );
     const { status, body } = await get(port);
     assert.strictEqual(status, 200);
-    // Pagination is a later issue: the response carries exactly one key.
-    assert.deepStrictEqual(Object.keys(body), ['items']);
+    // Issue #5: every list response carries the cursor envelope, cursor or not.
+    assert.deepStrictEqual(Object.keys(body), ['items', 'nextCursor']);
     assert.deepStrictEqual(body.items.map((t) => t.id), [1, 2, 3]);
+    // A short page (3 < default limit 20) is the end of the walk.
+    assert.strictEqual(body.nextCursor, null);
     // items carry the same shape as the POST responses.
     assert.deepStrictEqual(body.items[0], first.body);
   } finally {
@@ -173,12 +179,17 @@ test('limit caps the page: default 20 of 21, limit=1, and limit=100 keeps all 21
     const defaultPage = await get(port);
     assert.strictEqual(defaultPage.status, 200);
     assert.strictEqual(defaultPage.body.items.length, 20);
+    // A full page always emits the last id's cursor (base64 of 20), even though
+    // one more item exists — purely count-based rule.
+    assert.strictEqual(defaultPage.body.nextCursor, encodeId(20));
     const one = await get(port, '?limit=1');
     assert.strictEqual(one.status, 200);
     assert.strictEqual(one.body.items.length, 1);
+    assert.strictEqual(one.body.nextCursor, encodeId(1));
     const all = await get(port, '?limit=100');
     assert.strictEqual(all.status, 200);
-    assert.strictEqual(all.body.items.length, 21); // truncation only when limit < results
+    assert.strictEqual(all.body.items.length, 21); // short page keeps all 21
+    assert.strictEqual(all.body.nextCursor, null); // 21 < 100: end of walk
   } finally {
     await stop();
   }
@@ -205,6 +216,10 @@ test('invalid query parameters are 400 and leave the store and process untouched
       '?limit=2.5',
       '?limit=-1',
       '?limit=', // present but empty
+      '?cursor=@@@', // base64-impossible garbage
+      '?cursor=', // present but empty: never silently page one
+      '?cursor=banana', // decodes to non-id text
+      '?cursor=MA==', // canonical base64, but id 0 does not exist
     ];
     for (const query of rejected) {
       const { status, body } = await get(port, query);
