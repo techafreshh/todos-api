@@ -171,6 +171,32 @@ async function handleDelete(req, res, id) {
 // The prose "ties always break by id ascending, in both orders" contradicts
 // those arrays (it would yield [1,2,3] and [1,2]); the machine-checked arrays win.
 // One comparator over (sort field, id) multiplied by dir covers both orders.
+// Cursor codec (issue #5). A cursor is the plain base64 of the last item's
+// id as decimal digits: opaque to the client, and carrying no query state —
+// status/sort/order are always interpreted from the current request, so the
+// page is "ids strictly after the anchor in the ordering asked for now" and
+// therefore stable across intervening creates.
+function encodeCursor(id) {
+  return Buffer.from(String(id), 'utf8').toString('base64');
+}
+
+// Strict decode: null (→ 400 "invalid cursor") for anything that is not
+// exactly the canonical base64 of a positive safe integer id. Node's base64
+// decoder alone is too lenient — it silently skips stray characters and
+// accepts non-canonical padding — so validity is pinned down layer by layer:
+// charset regex, non-empty decode, re-encode-must-round-trip (rejects
+// 'mg==', 'Mg', 'Mg==x'), digits-only-as-1..N (rejects '0', '-1', '02',
+// '@@@', arbitrary text) and the safe-integer cap.
+function decodeCursor(cursor) {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cursor)) return null;
+  const decoded = Buffer.from(cursor, 'base64').toString('utf8');
+  if (encodeCursor(decoded) !== cursor) return null;
+  if (!/^[1-9]\d*$/.test(decoded)) return null;
+  const id = Number(decoded);
+  if (!Number.isSafeInteger(id)) return null;
+  return id;
+}
+
 async function handleList(req, res, searchParams) {
   // The request body is ignored, but still drained for keep-alive hygiene.
   await drainBody(req);
@@ -205,6 +231,19 @@ async function handleList(req, res, searchParams) {
     sendJson(res, 400, { error: 'invalid limit' });
     return;
   }
+  // Same ladder position as the limit check: a cursor, when present, must
+  // decode before the store is touched — a garbage cursor is a client error
+  // ("?cursor=" included, mirroring "?limit=" as present-but-invalid), never
+  // a silent restart at page one.
+  const cursorRaw = searchParams.get('cursor');
+  let cursorId = null;
+  if (cursorRaw !== null) {
+    cursorId = decodeCursor(cursorRaw);
+    if (cursorId === null) {
+      sendJson(res, 400, { error: 'invalid cursor' });
+      return;
+    }
+  }
   const dir = order === 'desc' ? -1 : 1;
   // createdAt is canonical second-precision RFC3339 UTC (nowRfc3339), so the
   // string comparison IS the chronological one; no Date.parse.
@@ -215,8 +254,24 @@ async function handleList(req, res, searchParams) {
   const items = [...todos.values()]
     .filter((todo) => status === null || todo.status === status)
     .sort((a, b) => dir * (comparePrimary(a, b) || (a.id - b.id)));
-  // Only 'items' here: pagination (cursor/nextCursor) is a later issue.
-  sendJson(res, 200, { items: items.slice(0, limit) });
+  // Page slicing by id anchor in the already-sorted array: with a cursor the
+  // page is every item strictly after the anchor's position in THIS request's
+  // ordering — creations that land after the anchor can never shift it. An
+  // anchor that no longer exists in the filtered set (deleted or filtered
+  // out mid-walk) yields an empty page, never a reslice of the head which
+  // would restart the walk at page one.
+  let page;
+  if (cursorId === null) {
+    page = items.slice(0, limit);
+  } else {
+    const anchorIndex = items.findIndex((todo) => todo.id === cursorId);
+    page = anchorIndex === -1 ? [] : items.slice(anchorIndex + 1, anchorIndex + 1 + limit);
+  }
+  // nextCursor is purely count-based: a full page promises more (re-paging an
+  // exactly-full tail deterministically re-answers the stable empty page),
+  // anything short means the walk is over.
+  const nextCursor = page.length < limit ? null : encodeCursor(page[page.length - 1].id);
+  sendJson(res, 200, { items: page, nextCursor });
 }
 
 // Serves POST and GET /todos, PATCH and DELETE /todos/<id>, and GET /health;
