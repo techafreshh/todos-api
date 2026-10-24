@@ -51,6 +51,7 @@ test('GET /health returns 200 {"ok":true}', async () => {
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.strictEqual(body.ok, true);
+    assert.strictEqual(body.status, 200);
   } finally {
     await stop();
   }
@@ -64,6 +65,28 @@ test('GET /nope returns 404 with an error body', async () => {
     assert.strictEqual(res.status, 404);
     const body = await res.json();
     assert.ok('error' in body, `expected an "error" key, got ${JSON.stringify(body)}`);
+  } finally {
+    await stop();
+  }
+});
+
+test('POST /todos with malformed JSON returns 400 and /health survives', async () => {
+  const { ready, stop } = startServer();
+  try {
+    const port = await ready;
+    const bad = await fetch(`http://127.0.0.1:${port}/todos`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"title":', // never a 500, never a hang (PRD §Errors)
+    });
+    assert.strictEqual(bad.status, 400);
+    const badBody = await bad.json();
+    assert.ok('error' in badBody, `expected an "error" key, got ${JSON.stringify(badBody)}`);
+    // the same process must keep serving /health immediately after the abuse
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.ok, true);
   } finally {
     await stop();
   }
