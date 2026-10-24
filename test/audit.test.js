@@ -14,8 +14,9 @@ const assert = require('node:assert');
 const SERVER_PATH = path.join(__dirname, '..', 'server.js');
 const READY_TIMEOUT_MS = 5000;
 
-// The cursor is the base64 of the last item's id (issue #5).
-const encodeId = (id) => Buffer.from(String(id), 'utf8').toString('base64');
+// The cursor is the last item's id as a plain base-10 string (PRD.md
+// Pagination semantics: "cursor is the last item's id from the previous page").
+const encodeId = (id) => String(id);
 
 function startServer() {
   // PORT=0 asks the OS for an ephemeral port, so parallel runs never collide.

@@ -13,9 +13,11 @@ const assert = require('node:assert');
 const SERVER_PATH = path.join(__dirname, '..', 'server.js');
 const READY_TIMEOUT_MS = 5000;
 
-// The cursor is the base64 of the last item's id (issue #5): the tests pin the
-// exact encodings the server must emit ('Mg==' for id 2, 'NA==' for 4, ...).
-const encodeId = (id) => Buffer.from(String(id), 'utf8').toString('base64');
+// The cursor is the last item's id as a plain base-10 string (PRD.md
+// Pagination semantics: "cursor is the last item's id from the previous
+// page"): the tests pin the exact renderings the server must emit
+// ('2' for id 2, '4' for id 4, ...).
+const encodeId = (id) => String(id);
 
 function startServer() {
   // PORT=0 asks the OS for an ephemeral port, so parallel runs never collide.
@@ -82,7 +84,7 @@ async function createTodos(port, specs) {
   return created;
 }
 
-test('first page: 5 todos, limit=2 gives ids [1,2] and nextCursor is the base64 of 2', async () => {
+test('first page: 5 todos, limit=2 gives ids [1,2] and nextCursor is the plain id "2"', async () => {
   const { ready, stop } = startServer();
   try {
     const port = await ready;
@@ -91,9 +93,10 @@ test('first page: 5 todos, limit=2 gives ids [1,2] and nextCursor is the base64 
     assert.strictEqual(status, 200);
     assert.deepStrictEqual(Object.keys(body), ['items', 'nextCursor']);
     assert.deepStrictEqual(body.items.map((t) => t.id), [1, 2]);
-    // Opaque is not arbitrary: the encoding is exactly base64 of the last id.
+    // The cursor is exactly the last item's id as a decimal string — it must
+    // round-trip verbatim through ?cursor= below.
     assert.strictEqual(body.nextCursor, encodeId(2));
-    assert.strictEqual(body.nextCursor, 'Mg==');
+    assert.strictEqual(body.nextCursor, '2');
   } finally {
     await stop();
   }
@@ -125,7 +128,7 @@ test('re-requesting the same cursor returns the identical page, byte for byte', 
     await createTodos(port, [{ title: 't1' }, { title: 't2' }, { title: 't3' }, { title: 't4' }, { title: 't5' }]);
     const { status } = await post(port, JSON.stringify({ title: 't6' }));
     assert.strictEqual(status, 201);
-    const query = '?limit=2&cursor=Mg==';
+    const query = '?limit=2&cursor=2';
     const first = await get(port, query);
     const second = await get(port, query);
     assert.strictEqual(first.status, 200);
@@ -294,7 +297,7 @@ test('invalid cursors are 400 with an error body and the process keeps serving',
   try {
     const port = await ready;
     await createTodos(port, [{ title: 'one' }, { title: 'two' }]);
-    const rejected = ['@@@', '', 'banana', 'mg==', 'Mg', 'MA==', 'MQ'];
+    const rejected = ['@@@', '', 'banana', 'mg==', 'Mg', 'MA==', 'MQ', '0', '02', '-1', '1e2', '2.5'];
     for (const cursor of rejected) {
       const { status, body } = await get(port, `?cursor=${cursor}`);
       assert.strictEqual(status, 400, `expected 400 for cursor=${JSON.stringify(cursor)}`);

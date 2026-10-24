@@ -12,9 +12,10 @@ const assert = require('node:assert');
 const SERVER_PATH = path.join(__dirname, '..', 'server.js');
 const READY_TIMEOUT_MS = 5000;
 
-// The cursor is the base64 of the last item's id (issue #5); the tests assert
-// against the exact encoding the server must produce.
-const encodeId = (id) => Buffer.from(String(id), 'utf8').toString('base64');
+// The cursor is the last item's id as a plain base-10 string (PRD.md
+// Pagination semantics: "cursor is the last item's id from the previous
+// page"); the tests assert against that exact rendering.
+const encodeId = (id) => String(id);
 
 function startServer() {
   // PORT=0 asks the OS for an ephemeral port, so parallel runs never collide.
@@ -191,8 +192,8 @@ test('limit caps the page: default 20 of 21, limit=1, and limit=100 keeps all 21
     const defaultPage = await get(port);
     assert.strictEqual(defaultPage.status, 200);
     assert.strictEqual(defaultPage.body.items.length, 20);
-    // A full page always emits the last id's cursor (base64 of 20), even though
-    // one more item exists — purely count-based rule.
+    // A full page always emits the last id's cursor (the plain id 20), even
+    // though one more item exists — purely count-based rule.
     assert.strictEqual(defaultPage.body.nextCursor, encodeId(20));
     const one = await get(port, '?limit=1');
     assert.strictEqual(one.status, 200);
@@ -228,10 +229,14 @@ test('invalid query parameters are 400 and leave the store and process untouched
       '?limit=2.5',
       '?limit=-1',
       '?limit=', // present but empty
-      '?cursor=@@@', // base64-impossible garbage
+      '?cursor=@@@', // non-id garbage
       '?cursor=', // present but empty: never silently page one
-      '?cursor=banana', // decodes to non-id text
-      '?cursor=MA==', // canonical base64, but id 0 does not exist
+      '?cursor=banana', // non-id text
+      '?cursor=MA==', // base64 residue is never an id under the plain codec
+      '?cursor=0', // id 0: below the positive range
+      '?cursor=02', // leading zero: not the canonical rendering
+      '?cursor=-1', // negative
+      '?cursor=1e2', // exponent notation is not digits
     ];
     for (const query of rejected) {
       const { status, body } = await get(port, query);
