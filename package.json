@@ -1,1 +1,0 @@
-{"name": "todos-api", "version": "1.0.0", "private": true, "description": "In-memory TODO collection API over plain node:http (PRD.md).", "scripts": {"start": "node server.js", "test": "node --test"}, "engines": {"node": ">=22"}}
