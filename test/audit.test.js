@@ -288,3 +288,74 @@ test('audit: nextCursor is null exactly when fewer than limit items were returne
     await stop();
   }
 });
+
+test('audit: end-to-end walk — full wire bodies for pages, both-order priority walks, filters and a deleted id (intervening create included)', async () => {
+  const { ready, stop } = startServer();
+  try {
+    const port = await ready;
+    // Priorities: alpha 5, bravo 1, charlie 5, delta 3, echo 5 — then foxtrot
+    // (priority 3) is created between two page requests (ids 5 and 6).
+    const created = await createTodos(port, [
+      { title: 'alpha', priority: 5 },
+      { title: 'bravo', priority: 1 },
+      { title: 'charlie', priority: 5 },
+      { title: 'delta', priority: 3 },
+      { title: 'echo', priority: 5 },
+    ]);
+    const [alpha, bravo, charlie, delta, echo] = created;
+    // Sequential creates keep createdAt monotone (equal seconds fall to the
+    // id-ascending tie), so the default order is the id order — deterministic
+    // regardless of second boundaries. Full-body equality pins the wire shape:
+    // items carry the POST response objects verbatim, nextCursor a plain id
+    // string or null (PRD.md Pagination semantics).
+    const first = await get(port, '?limit=2');
+    assert.deepStrictEqual(first.body, { items: [alpha, bravo], nextCursor: '2' });
+    const foxtrot = await post(port, JSON.stringify({ title: 'foxtrot', priority: 3 }));
+    assert.strictEqual(foxtrot.status, 201);
+    assert.strictEqual(foxtrot.body.id, 6);
+    // Intervening creates cannot shift a page: ids strictly after the anchor.
+    const second = await get(port, `?limit=2&cursor=${first.body.nextCursor}`);
+    assert.deepStrictEqual(second.body, { items: [charlie, delta], nextCursor: '4' });
+    // Re-requesting the same cursor returns the same page.
+    const secondAgain = await get(port, `?limit=2&cursor=${first.body.nextCursor}`);
+    assert.deepStrictEqual(secondAgain.body, second.body);
+    const third = await get(port, `?limit=2&cursor=${second.body.nextCursor}`);
+    assert.deepStrictEqual(third.body, { items: [echo, foxtrot.body], nextCursor: '6' });
+    const tailPage = await get(port, `?limit=2&cursor=${third.body.nextCursor}`);
+    assert.deepStrictEqual(tailPage.body, { items: [], nextCursor: null });
+    // Priority walk, asc: 1 (id 2), 3 (ids 4, 6), 5 (ids 1, 3, 5) — ties id-asc.
+    const asc1 = await get(port, '?sort=priority&limit=2');
+    assert.deepStrictEqual(asc1.body, { items: [bravo, delta], nextCursor: '4' });
+    const asc2 = await get(port, '?sort=priority&limit=2&cursor=4');
+    assert.deepStrictEqual(asc2.body, { items: [foxtrot.body, alpha], nextCursor: '1' });
+    const asc3 = await get(port, '?sort=priority&limit=2&cursor=1');
+    assert.deepStrictEqual(asc3.body, { items: [charlie, echo], nextCursor: '5' });
+    const asc4 = await get(port, '?sort=priority&limit=2&cursor=5');
+    assert.deepStrictEqual(asc4.body, { items: [], nextCursor: null });
+    // Priority walk, desc: 5 (1, 3, 5), 3 (4, 6), 1 (2) — dir hits the priority
+    // alone; every tie still id-ascending (PRD.md Read semantics, issue #13).
+    const desc1 = await get(port, '?sort=priority&order=desc&limit=2');
+    assert.deepStrictEqual(desc1.body, { items: [alpha, charlie], nextCursor: '3' });
+    const desc2 = await get(port, '?sort=priority&order=desc&limit=2&cursor=3');
+    assert.deepStrictEqual(desc2.body, { items: [echo, delta], nextCursor: '4' });
+    const desc3 = await get(port, '?sort=priority&order=desc&limit=2&cursor=4');
+    assert.deepStrictEqual(desc3.body, { items: [foxtrot.body, bravo], nextCursor: '2' });
+    const desc4 = await get(port, '?sort=priority&order=desc&limit=2&cursor=2');
+    assert.deepStrictEqual(desc4.body, { items: [], nextCursor: null });
+    // Filters answer from the same store without disturbing the walks.
+    const patched = await patch(port, 2, { status: 'done' });
+    assert.strictEqual(patched.status, 200);
+    const done = await get(port, '?status=done');
+    assert.deepStrictEqual(done.body, { items: [{ ...bravo, status: 'done' }], nextCursor: null });
+    const open = await get(port, '?status=open');
+    assert.deepStrictEqual(open.body, { items: [alpha, charlie, delta, echo, foxtrot.body], nextCursor: null });
+    // A deleted id vanishes from every listing; remaining ids keep their order.
+    const gone = await del(port, 3);
+    assert.strictEqual(gone.status, 204);
+    const afterDelete = await get(port, '?limit=100');
+    assert.deepStrictEqual(afterDelete.body.items.map((t) => t.id), [1, 2, 4, 5, 6]);
+    await expectSurvive(port);
+  } finally {
+    await stop();
+  }
+});
