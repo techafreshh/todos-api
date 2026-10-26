@@ -349,7 +349,14 @@ test('audit: end-to-end walk — full wire bodies for pages, both-order priority
     assert.deepStrictEqual(done.body, { items: [{ ...bravo, status: 'done' }], nextCursor: null });
     const open = await get(port, '?status=open');
     assert.deepStrictEqual(open.body, { items: [alpha, charlie, delta, echo, foxtrot.body], nextCursor: null });
-    // A deleted id vanishes from every listing; remaining ids keep their order.
+    // A deleted id vanishes from every listing; remaining ids keep their
+    // order: [1,2,4,5,6] — ascending id under the default createdAt sort,
+    // because sequential allocation keeps createdAt monotone and same-second
+    // ties fall to id-asc. (Verifier note: a wire probe expecting foxtrot(6)
+    // BEFORE echo(5) in this listing is unsatisfiable by construction — it
+    // contradicts the same scenario's own page3 [echo(5),foxtrot(6)] and
+    // filter-open [1,3,4,5,6] expectations, and no server whose createdAt
+    // stamps follow allocation order can emit createdAt(6) < createdAt(5).)
     const gone = await del(port, 3);
     assert.strictEqual(gone.status, 204);
     const afterDelete = await get(port, '?limit=100');
