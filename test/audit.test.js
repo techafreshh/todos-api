@@ -126,6 +126,44 @@ test('audit: priority ties break id-ascending in BOTH orders (7 todos, heavy tie
   }
 });
 
+test('audit: desc tie groups page one item at a time — id ascending, never revisited', async () => {
+  const { ready, stop } = startServer();
+  try {
+    const port = await ready;
+    // Priorities 5,5,5 on ids 1,2,3 and 1 on id 4: desc order is the tie group
+    // [1,2,3] (id ascending under desc, per issue #13) followed by [4].
+    await createTodos(port, [
+      { title: 'a', priority: 5 },
+      { title: 'b', priority: 5 },
+      { title: 'c', priority: 5 },
+      { title: 'd', priority: 1 },
+    ]);
+    const walk = [];
+    let cursor = null;
+    for (;;) {
+      const { status, body } = await get(
+        port,
+        `?sort=priority&order=desc&limit=1${cursor === null ? '' : `&cursor=${cursor}`}`,
+      );
+      assert.strictEqual(status, 200);
+      if (body.items.length === 0) {
+        // The tail page closes the walk with the count-based null cursor.
+        assert.strictEqual(body.nextCursor, null);
+        break;
+      }
+      walk.push(...body.items.map((t) => t.id));
+      cursor = body.nextCursor;
+      // limit=1 always yields a full page here, so a cursor must be emitted.
+      assert.notStrictEqual(cursor, null);
+    }
+    // Cursors are positional in the requested ordering: the tie group is
+    // walked id-ascending one item at a time and no id is served twice.
+    assert.deepStrictEqual(walk, [1, 2, 3, 4]);
+  } finally {
+    await stop();
+  }
+});
+
 test('audit: parameter order is irrelevant, including with a cursor', async () => {
   const { ready, stop } = startServer();
   try {
