@@ -171,6 +171,11 @@ test('audit: every invalid parameter answers 400 — even combined with a valid 
     const first = await get(port, '?limit=2');
     assert.strictEqual(first.status, 200);
     const validCursor = first.body.nextCursor;
+    // The same valid page, fetched before and after the battery below: a
+    // rejected request must not touch the store, so both must be identical.
+    const cursorPage = `?limit=2&cursor=${validCursor}`;
+    const before = await get(port, cursorPage);
+    assert.strictEqual(before.status, 200);
     // Each bad value rides along with other (valid) parameters, so a silently
     // ignored parameter or a 500 would slip through a weaker probe.
     const battery = [
@@ -189,6 +194,10 @@ test('audit: every invalid parameter answers 400 — even combined with a valid 
       assert.ok('error' in body, `expected an "error" key for ${query}, got ${JSON.stringify(body)}`);
       await expectSurvive(port);
     }
+    // Validation is pure: after every rejected request the same cursor still
+    // answers the same page, byte for byte.
+    const after = await get(port, cursorPage);
+    assert.deepStrictEqual(after.body, before.body);
   } finally {
     await stop();
   }
@@ -349,14 +358,10 @@ test('audit: end-to-end walk — full wire bodies for pages, both-order priority
     assert.deepStrictEqual(done.body, { items: [{ ...bravo, status: 'done' }], nextCursor: null });
     const open = await get(port, '?status=open');
     assert.deepStrictEqual(open.body, { items: [alpha, charlie, delta, echo, foxtrot.body], nextCursor: null });
-    // A deleted id vanishes from every listing; remaining ids keep their
-    // order: [1,2,4,5,6] — ascending id under the default createdAt sort,
-    // because sequential allocation keeps createdAt monotone and same-second
-    // ties fall to id-asc. (Verifier note: a wire probe expecting foxtrot(6)
-    // BEFORE echo(5) in this listing is unsatisfiable by construction — it
-    // contradicts the same scenario's own page3 [echo(5),foxtrot(6)] and
-    // filter-open [1,3,4,5,6] expectations, and no server whose createdAt
-    // stamps follow allocation order can emit createdAt(6) < createdAt(5).)
+    // A deleted id vanishes from every listing while the survivors keep
+    // their order: [1,2,4,5,6]. Sequential allocation keeps createdAt
+    // monotone and same-second ties fall to id ascending, so the remaining
+    // ids stay in allocation order (id 6 after id 5, never before).
     const gone = await del(port, 3);
     assert.strictEqual(gone.status, 204);
     const afterDelete = await get(port, '?limit=100');
