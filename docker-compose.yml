@@ -1,12 +1,8 @@
-# Compose defaults the project name to the directory basename ("repo"), so
-# every scenario run from this checkout shares the container name
-# "repo-worker-1": two overlapping runs fail with "container name is already
-# in use" (the loser's worker never starts, so all of its probes read curl
-# 000) and one run's teardown removes the other's worker mid-walk. Keying the
-# project on the scenario's PORT gives each run a private container while the
-# service stays exactly `worker` (PRD delivery requirement 2); with PORT unset
-# the project is todos-api-3000 and the mapping below stays 127.0.0.1:3000.
-name: "todos-api-${PORT:-3000}"
+# Service stays exactly `worker` (PRD delivery requirement 2) and the file
+# deliberately sets nothing else about the project: an explicit top-level
+# `name:` (tried in a repair round) is unsupported before compose v2.3 and
+# would make `docker compose up` fail outright — i.e. it risks the delivery
+# requirement to solve a collision the delivery requirement never mentions.
 services:
   worker:
     image: node:22-alpine
