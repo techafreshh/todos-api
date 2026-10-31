@@ -1,7 +1,6 @@
 services:
   worker:
     image: node:22-alpine
-    restart: unless-stopped
     working_dir: /app
     # The scenario assigns the worker its port through PORT (PRD.md Product:
     # "listens on PORT from the environment"). Interpolate that port into both
