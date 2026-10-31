@@ -164,37 +164,29 @@ async function handleDelete(req, res, id) {
   sendNoContent(res);
 }
 
-// The exact desc ordering the acceptance arrays demand is the full reversal
-// of asc — id tie-break included:
-//   priorities 5,1,1 (ids 1,2,3): asc [2,3,1], desc [1,3,2] (tie 1,1 flips to id 3,2);
-//   same-second createdAt (ids 1,2): asc [1,2], desc [2,1].
-// The prose "ties always break by id ascending, in both orders" contradicts
-// those arrays (it would yield [1,2,3] and [1,2]); the machine-checked arrays win.
-// One comparator over (sort field, id) multiplied by dir covers both orders.
-// Cursor codec (issue #5). A cursor is the plain base64 of the last item's
-// id as decimal digits: opaque to the client, and carrying no query state —
-// status/sort/order are always interpreted from the current request, so the
-// page is "ids strictly after the anchor in the ordering asked for now" and
-// therefore stable across intervening creates.
+// Cursor codec (issue #5, re-encoded by the issue-13 audit): a cursor IS the
+// last item's id as a plain base-10 string — PRD.md Pagination semantics say
+// "cursor is the last item's id from the previous page", so nextCursor emits
+// String(id) ('2', not base64 'Mg==') and the same string round-trips through
+// ?cursor=. It carries no query state: status/sort/order are always
+// interpreted from the current request, so the page is "ids strictly after
+// the anchor in the ordering asked for now" and therefore stable across
+// intervening creates. (The earlier base64 encoding was rejected as a PRD
+// deviation: it made ?cursor=<echoed nextCursor> answer 400.)
 function encodeCursor(id) {
-  return Buffer.from(String(id), 'utf8').toString('base64');
+  return String(id);
 }
 
 // Strict decode: null (→ 400 "invalid cursor") for anything that is not
-// exactly the canonical base64 of a positive safe integer id. Node's base64
-// decoder alone is too lenient — it silently skips stray characters and
-// accepts non-canonical padding — so validity is pinned down layer by layer:
-// charset regex, non-empty decode, re-encode-must-round-trip (rejects
-// 'mg==', 'Mg', 'Mg==x'), digits-only-as-1..N (rejects '0', '-1', '02',
-// '@@@', arbitrary text) and the safe-integer cap.
+// exactly the canonical base-10 rendering of a positive safe integer id.
+// One charset regex rejects '@@@', arbitrary text, empty strings, base64
+// residue ('Mg==', 'MA=='), 'Mg', '0', '-1', '02' and '1e2' in one shot —
+// and Node's lenient base64/number coercions never get involved. The
+// safe-integer cap is the only value-space bound an id can exceed.
 function decodeCursor(cursor) {
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cursor)) return null;
-  const decoded = Buffer.from(cursor, 'base64').toString('utf8');
-  if (encodeCursor(decoded) !== cursor) return null;
-  if (!/^[1-9]\d*$/.test(decoded)) return null;
-  const id = Number(decoded);
-  if (!Number.isSafeInteger(id)) return null;
-  return id;
+  if (!/^[1-9]\d*$/.test(cursor)) return null;
+  const id = Number(cursor);
+  return Number.isSafeInteger(id) ? id : null;
 }
 
 async function handleList(req, res, searchParams) {
@@ -251,9 +243,15 @@ async function handleList(req, res, searchParams) {
     sort === 'priority'
       ? (a, b) => a.priority - b.priority
       : (a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
+  // Ties always break by id ascending in BOTH orders (PRD.md "Read (list +
+  // query semantics)", issue #13): `dir` multiplies only the primary key, so
+  // priorities 5,1,1 (ids 1,2,3) give asc [2,3,1] and desc [1,2,3]. The old
+  // full-reversal form `dir * (comparePrimary || id-cmp)` — from issue #4's
+  // out-of-repo acceptance arrays — flipped ties to id-descending under desc,
+  // contradicting the PRD; the parens must stay off the tie-break.
   const items = [...todos.values()]
     .filter((todo) => status === null || todo.status === status)
-    .sort((a, b) => dir * (comparePrimary(a, b) || (a.id - b.id)));
+    .sort((a, b) => dir * comparePrimary(a, b) || (a.id - b.id));
   // Page slicing by id anchor in the already-sorted array: with a cursor the
   // page is every item strictly after the anchor's position in THIS request's
   // ordering — creations that land after the anchor can never shift it. An

@@ -1,9 +1,23 @@
+# Service stays exactly `worker` (PRD delivery requirement 2) and the file
+# deliberately sets nothing else about the project: an explicit top-level
+# `name:` (tried in a repair round) is unsupported before compose v2.3 and
+# would make `docker compose up` fail outright — i.e. it risks the delivery
+# requirement to solve a collision the delivery requirement never mentions.
 services:
   worker:
     image: node:22-alpine
     working_dir: /app
+    # The scenario assigns the worker its port through PORT (PRD.md Product:
+    # "listens on PORT from the environment"). Interpolate that port into both
+    # the container process and the published host mapping: a hardcoded 3000
+    # here left every scenario probe connecting to a port nothing served
+    # (curl status 000) even though the process was healthy on 3000, because
+    # the published host port did not follow the assignment. The 3000 fallback
+    # keeps `docker compose up` working with no PORT in the environment.
+    environment:
+      PORT: "${PORT:-3000}"
     volumes:
       - .:/app
     command: node server.js
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
